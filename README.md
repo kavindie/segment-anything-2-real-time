@@ -75,3 +75,24 @@ We provide the file `sam2/benchmark.py` to test the speed gain from using the mo
 ## References:
 
 - SAM2 Repository: https://github.com/facebookresearch/sam2
+
+
+## My additions
+pip install matplotlib opencv-python accelerate grouped_gemm==0.1.6 protobuf loguru 
+
+. venv2
+pip install open-clip-torch
+pip uninstall numpy
+pip install "numpy<2"
+pip install --upgrade protobuf wandb
+pip install ultralytics open3d openai supervision--0.11.0 imageio natsort kornia faiss-cpu transformers yapf pycocotools fairscale ml_dtypes setuptools wheel ninja
+module load cuda/12.6.3 
+export PATH=$CUDA_HOME/bin:$PATH
+export AM_I_DOCKER=False
+export BUILD_WITH_CUDA=True
+pip install --no-build-isolation -e ../Grounded-Segment-Anything/GroundingDINO
+
+
+
+/scratch3/kat049/Grounded-Segment-Anything/segment_anything/segment_anything/predictor.py:168
+        iou_predictions_np = iou_predictions[0].detach().cpu().float().numpy()
