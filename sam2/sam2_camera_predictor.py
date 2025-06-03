@@ -67,10 +67,10 @@ class SAM2CameraPredictor(SAM2Base):
         return img, width, height
     ###
     @torch.inference_mode()
-    def load_first_frame(self, img):
+    def load_first_frame(self, img, device=torch.device("cuda")):
 
         self.condition_state = self._init_state(
-            offload_video_to_cpu=False, offload_state_to_cpu=False
+            offload_video_to_cpu=False, offload_state_to_cpu=False, device=device
         )
         img, width, height = self.perpare_data(img, image_size=self.image_size)
         self.condition_state["images"] = [img]
@@ -91,6 +91,7 @@ class SAM2CameraPredictor(SAM2Base):
         self,
         offload_video_to_cpu=False,
         offload_state_to_cpu=False,
+        device=torch.device("cuda"),
     ):
         self.condition_state = {}
 
@@ -104,11 +105,11 @@ class SAM2CameraPredictor(SAM2Base):
         self.condition_state["offload_state_to_cpu"] = offload_state_to_cpu
         # the original video height and width, used for resizing final output scores
 
-        self.condition_state["device"] = torch.device("cuda")
+        self.condition_state["device"] = device
         if offload_state_to_cpu:
             self.condition_state["storage_device"] = torch.device("cpu")
         else:
-            self.condition_state["storage_device"] = torch.device("cuda")
+            self.condition_state["storage_device"] = device
         # inputs on each frame
         self.condition_state["point_inputs_per_obj"] = {}
         self.condition_state["mask_inputs_per_obj"] = {}
@@ -1028,6 +1029,7 @@ class SAM2CameraPredictor(SAM2Base):
             image = (
                 self.condition_state["images"][frame_idx].cuda().float().unsqueeze(0)
             )
+            image = image.to(self.condition_state["device"], non_blocking=True)
             backbone_out = self.forward_image(image)
             # Cache the most recent frame's feature (for repeated interactions with
             # a frame; we can use an LRU cache for more frames in the future).
@@ -1211,7 +1213,7 @@ class SAM2CameraPredictor(SAM2Base):
             non_cond_frame_outputs.pop(t, None)
             for obj_output_dict in self.condition_state["output_dict_per_obj"].values():
                 obj_output_dict["non_cond_frame_outputs"].pop(t, None)
-
+    
 
 class SAM2CameraPredictorVOS(SAM2CameraPredictor):
     """Optimized for the VOS setting"""
