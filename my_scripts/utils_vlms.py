@@ -44,16 +44,18 @@ def answerwAria(
     
     inputs.to(model.device)
 
+
     with torch.no_grad():
         output = model.generate(
             **inputs,
-            max_new_tokens=512,
-            # stop_strings=["<|im_end|>"],
+            max_new_tokens=256,
+            stop_strings=["<|im_end|>"],
             tokenizer=processor.tokenizer,
             do_sample=True,
             temperature=0.1,#0.9
         )
     output_ids = output[0][inputs["input_ids"].shape[1]:]
     response = processor.decode(output_ids, skip_special_tokens=True)
+    response = response.replace("<|im_end|>", "").strip()
     return response
 
