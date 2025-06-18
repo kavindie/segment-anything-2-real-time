@@ -8,6 +8,7 @@ from matplotlib import pyplot as plt
 from tqdm import tqdm
 import requests
 import re
+from tqdm.auto import tqdm
 
 # My imports
 import sys
@@ -18,9 +19,16 @@ sys.path.extend([
 ])
 from my_scripts.utils_vis import get_masked_image
 from my_scripts.utils_vlms import answerwAria
-from my_scripts.utils_graph import get_relative_distance2obj, load_data_files, find_closest_pose, calculate_motion_between_frames, create_mixed_graph, visualize_mixed_graph
+from my_scripts.utils_graph import get_relative_distance2obj, load_data_files, find_closest_pose, calculate_motion_between_frames, create_mixed_graph, visualize_mixed_graph, GraphNode, GraphState
+from my_scripts.LLM_planning import SpatioTemporalAgent, ConversationalAgent, ChainOfThoughtAgent
 from segment_anything import SamAutomaticMaskGenerator, sam_model_registry
 from auto_mask_batch import masks_update, Prompts
+
+# initialize the depth
+rgb_df, pose_df = load_data_files(
+    "/scratch3/kat049/VSLAM-LAB-Benchmark/DARPA/p14_fr_2/rgb.txt",
+    "/scratch3/kat049/VSLAM-LAB-Benchmark/DARPA/p14_fr_2/groundtruth.txt"
+)
 
 class MultiObjectSAM2CameraPredictor:
     def __init__(self, model_cfg, sam2_checkpoint, device="cuda"):
@@ -170,8 +178,9 @@ class MultiObjectSAM2CameraPredictor:
         self.tracked_objects.clear()
         self.is_initialized = False
 
-def create_seq_graph(video_dir, frame_names, mask_generator, prompts_loader, tracker):
+def create_seq_graph(start_idx, video_dir, frame_names, mask_generator, prompts_loader, tracker):
     first_frame = frame_names[0]
+    file_prev = first_frame
     frame = Image.open(os.path.join(video_dir, first_frame)) #image_pil
     frame_RGB = np.array(frame) #image_rgb
     frame_BGR = frame_RGB[:, :, ::-1]  # image
@@ -187,41 +196,32 @@ def create_seq_graph(video_dir, frame_names, mask_generator, prompts_loader, tra
         seg = masks[ann_obj_id]['segmentation']
         prompts_loader.add(ann_obj_id,0,seg)
     bboxes = [masks[i]['bbox'] for i in range(len(masks))]
-    # Initialize video capture
-    # cap = cv2.VideoCapture("/scratch3/kat049/datasets/DARPA/p14_fr/camera0-1024x768-002.mp4")
 
-    ##Create initialze graph
+    def Aria_caption(masked_rgb_cropped):
+        """
+        Generate caption for the masked image using Aria model.
+        Args:
+            masked_rgb_cropped: Masked RGB image to generate caption for.
+        Returns:
+            Generated caption.
+        """
+        question = """Describe what is shown in the image"""
+        return answerwAria(question, masked_rgb_cropped)
+
+    ## Create initialze graph
     G_temporal = []
     connect_Gs = []
     captions = []
+
     image_nodes = [get_masked_image(frame_RGB, masks[i]['segmentation']) for i in range(len(masks))]
     mean_depths = [get_relative_distance2obj(video_dir, first_frame, masks[i]['segmentation']) for i in range(len(masks))]
-    G = create_mixed_graph(image_nodes, mean_depths)
+    captions = None #[Aria_caption(get_masked_image(frame_RGB, masks[i]['segmentation'])) for i in range(len(masks))]
+    G = create_mixed_graph(image_nodes=image_nodes, rel_distances=mean_depths, timestamp=start_idx, captions=captions)
     G_temporal.append(G)
-
-    # Aria
-    captions_t = []
-    for mask in masks:
-        masked_rgb_cropped = get_masked_image(frame_RGB, mask['segmentation'])
-        question = """Describe what is shown in the image"""
-        caption = answerwAria(question, masked_rgb_cropped)
-        captions_t.append(caption)
-        print(caption)
-    captions.append(captions_t)
 
     with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
         # Load first frame
         tracker.load_first_frame(frame_BGR)
-        
-        # Add multiple objects to track
-        # You can add objects with different prompt types
-        # object_prompts = [
-        # #     ((100, 100), "point"),     # Point at (100, 100)
-        # #     ((200, 150), "point"),     # Another point
-        # #     ((50, 50, 150, 150), "bbox"),  # Bounding box (x1, y1, x2, y2)
-        #     ((620, 540, 980, 800), "bbox", 0),  # Bounding box (x1, y1, x2, y2)
-        #     ((160, 510, 220, 580), "bbox", 1)  # Bounding box (x1, y1, x2, y2)
-        # ]
         object_prompts = []
         for obj_id, bbox in zip(ann_obj_id_list, bboxes):
             object_prompts.append(((bbox[0], bbox[1], bbox[2], bbox[3]), "bbox", obj_id))
@@ -229,24 +229,13 @@ def create_seq_graph(video_dir, frame_names, mask_generator, prompts_loader, tra
         object_ids = tracker.add_multiple_objects(object_prompts)
         print(f"Added objects with IDs: {object_ids}")
         
-        # fig, axes  = plt.subplots(6, 5, figsize=(16, 12))
-        plots = 0
-        # ax_iter = iter(axes.flat)
-
         # Main tracking loop
-        for i, f in enumerate(frame_names[1:]):
-            plots += 1
-            if plots > 30:
-                break
+        for i, f in tqdm(enumerate(frame_names[1:])):
             frame = Image.open(os.path.join(video_dir, f)) #image_pil
             frame_RGB = np.array(frame) #image_rgb
             frame_BGR = frame_RGB[:, :, ::-1]  # image
 
             out_obj_ids, out_mask_logits = tracker.track_frame(frame_BGR)
-            
-            # Prepare figure
-            # ax = next(ax_iter)
-            # display_img = frame_RGB.copy()
 
             rel_motion = np.square(calculate_motion_between_frames(file_prev, f, rgb_df, pose_df)['translation']).sum() ** 0.5
             file_prev = f
@@ -254,61 +243,37 @@ def create_seq_graph(video_dir, frame_names, mask_generator, prompts_loader, tra
                 connect_Gs.append(rel_motion)
             else:
                 connect_Gs.append(0.0)
-
+            
             image_nodes = []
             mean_depths = []
+            captions_t = []
             # Process and visualize results
             if len(out_obj_ids) > 0:
                 # Convert masks to numpy arrays and overlay on frame
-                title = ""
                 for i, (obj_id, mask_logit) in enumerate(zip(out_obj_ids, out_mask_logits)):
                     # Convert logits to binary mask
                     mask = (mask_logit.squeeze() > 0).cpu().numpy()  # Shape: (768, 1024)
-                    image_nodes.append(get_masked_image(frame_RGB, mask))
+                    
+                    if not (mask==True).any():
+                        print(f"No mask found for object {obj_id}, skipping")
+                        mean_depths.append(0)
+                        image_nodes.append(None)
+                        captions_t.append("")
+                        continue
 
                     mean_depth = get_relative_distance2obj(video_dir, f, mask)
                     mean_depths.append(mean_depth)
 
                     masked_rgb_cropped = get_masked_image(frame_RGB, mask)
-                    if masked_rgb_cropped is None:
-                        print("No mask found, skipping frame")
-                        continue
-                    # Create colored overlay for this object
-                    # color = [(255, 0, 0), (0, 255, 0), (0, 0, 255), 
-                    #         (255, 255, 0), (255, 0, 255), (0, 255, 255)][i % 6]
-                    
-                    # # Apply mask overlay
-                    # colored_mask = np.zeros_like(display_img)
-                    # colored_mask[mask > 0] = color
-                    # alpha = 0.3
-                    # display_img = ((1 - alpha) * display_img + alpha * colored_mask).astype(np.uint8)
-                    
-                    # title += f"{mean_depth:.2f}m, {rel_motion:.2f}m, ID: {obj_id}\n"
-                # ax.set_title(title.strip())
-            # Display frame
-            # ax.imshow(display_img)
-            # ax.axis('off')
+                    image_nodes.append(masked_rgb_cropped)
+                    caption = None #Aria_caption(masked_rgb_cropped)
+                    captions_t.append(caption)
             
-            G = create_mixed_graph(image_nodes, mean_depths)
+            G = create_mixed_graph(image_nodes, mean_depths, timestamp=start_idx+i+1, captions=captions_t)
             G_temporal.append(G)
+            # captions.append(captions_t)
 
-
-            # # Break on 'q' key
-            # if cv2.waitKey(1) & 0xFF == ord('q'):
-            #     break
-                
-            # # Example: Add new object on 'a' key press
-            # key = cv2.waitKey(1) & 0xFF
-            # if key == ord('a'):
-            #     # Add new object at center of frame
-            #     h, w = frame_BGR.shape[:2]
-            #     new_obj_id, _ = tracker.add_new_object((w//2, h//2), "point")
-            #     if new_obj_id:
-            #         print(f"Added new object with ID: {new_obj_id}")
-    
-        # plt.savefig('test.png')
-        # plt.close(fig)
-
+    return G_temporal, connect_Gs, captions
 
 def example_multi_object_tracking():
     """
@@ -340,6 +305,7 @@ def example_multi_object_tracking():
     # intialize the video
     start_idx = 1148
     vis_gap = 30
+    length_seq = 5 #60
 
     video_dir = "/scratch3/kat049/datasets/DARPA/p14_fr/results" #args.video_path
     frame_names = [
@@ -347,168 +313,126 @@ def example_multi_object_tracking():
         if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
     ]
     frame_names.sort(key=lambda p: int(p[len("frame"):].split('.')[0]))
-    frame_names = frame_names[start_idx:-1:vis_gap]
-    file_prev = frame_names[0]
+    
+    G_temporal_seq = []
+    connect_Gs_seq = []
+    captions_seq = []
+    for i in range(3):
+        end_index = start_idx + vis_gap*length_seq
+        frame_names_seq = frame_names[start_idx:end_index:vis_gap]
+        G_temporal, connect_Gs, captions = create_seq_graph(start_idx, video_dir, frame_names_seq, mask_generator, prompts_loader, tracker)
 
-    # initialize the depth
-    rgb_df, pose_df = load_data_files(
-        "/scratch3/kat049/VSLAM-LAB-Benchmark/DARPA/p14_fr_2/rgb.txt",
-        "/scratch3/kat049/VSLAM-LAB-Benchmark/DARPA/p14_fr_2/groundtruth.txt"
-    )
-
-    start_frame = Image.open(os.path.join(video_dir, frame_names[0])) #image_pil
-    frame_RGB = np.array(frame) #image_rgb
-    frame_BGR = frame_RGB[:, :, ::-1]  # image
-    width, height = frame.size[0], frame.size[1]
-
-    # generate masks for the first frame
-    masks_default, masks_s, masks_m, masks_l = mask_generator.generate(frame_RGB)
-    masks_default, masks_s, masks_m, masks_l = masks_update(masks_default, masks_s, masks_m, masks_l, iou_thr=0.8, score_thr=0.7, inner_thr=0.5)
-    masks = [mask for mask in masks_l]
-    other_masks = [mask for mask in masks_s] + [mask for mask in masks_m]
-    ann_obj_id_list = range(len(masks))
-    for ann_obj_id in tqdm(ann_obj_id_list):
-        seg = masks[ann_obj_id]['segmentation']
-        prompts_loader.add(ann_obj_id,0,seg)
-    bboxes = [masks[i]['bbox'] for i in range(len(masks))]
-    # Initialize video capture
-    # cap = cv2.VideoCapture("/scratch3/kat049/datasets/DARPA/p14_fr/camera0-1024x768-002.mp4")
+        sample_data = {}
+        for timestamp in range(len(G_temporal)):
+            nodes_org = G_temporal[timestamp].nodes
+            nodes = {
+                key: GraphNode(
+                    id=key,
+                    position=nodes_org[key]['position'], 
+                    image=nodes_org[key]['content'],
+                    text=nodes_org[key]['caption'],
+                    timestamp=nodes_org[key]['timestamp'],
+                )
+                for key in nodes_org.keys()
+            }
+            sample_data[timestamp] = GraphState(nodes, timestamp)
 
 
-    ##Create initialze graph
-    G_temporal = []
-    connect_Gs = []
-    image_nodes = [get_masked_image(frame_RGB, masks[i]['segmentation']) for i in range(len(masks))]
-    mean_depths = [get_relative_distance2obj(video_dir, frame_names[0], masks[i]['segmentation']) for i in range(len(masks))]
-    G = create_mixed_graph(image_nodes, mean_depths)
-    G_temporal.append(G)
-
-    # Aria
-    masked_rgb_cropped = get_masked_image(frame_RGB, masks[10]['segmentation'])
-    question = """Describe what is shown in the image"""
-    caption = answerwAria(question, masked_rgb_cropped)
-    print(caption)
-
-    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-        # Load first frame
-        tracker.load_first_frame(frame_BGR)
+        # SIMPLE TOOL EXECUTION
+        agent = SpatioTemporalAgent(sample_data)
         
-        # Add multiple objects to track
-        # You can add objects with different prompt types
-        # object_prompts = [
-        # #     ((100, 100), "point"),     # Point at (100, 100)
-        # #     ((200, 150), "point"),     # Another point
-        # #     ((50, 50, 150, 150), "bbox"),  # Bounding box (x1, y1, x2, y2)
-        #     ((620, 540, 980, 800), "bbox", 0),  # Bounding box (x1, y1, x2, y2)
-        #     ((160, 510, 220, 580), "bbox", 1)  # Bounding box (x1, y1, x2, y2)
-        # ]
-        object_prompts = []
-        for obj_id, bbox in zip(ann_obj_id_list, bboxes):
-            object_prompts.append(((bbox[0], bbox[1], bbox[2], bbox[3]), "bbox", obj_id))
-
-        object_ids = tracker.add_multiple_objects(object_prompts)
-        print(f"Added objects with IDs: {object_ids}")
+        # Get available tools
+        print("Available tools:")
+        for tool_name, description in agent.get_available_tools().items():
+            print(f"- {tool_name}: {description.strip()}")
+    
+        print("\n" + "="*50 + "\n")
         
-        # fig, axes  = plt.subplots(6, 5, figsize=(16, 12))
-        plots = 0
+        # Answer movement question
+        answer = agent.answer_movement_question('mask8')
+        print(answer)
+        
+        # Use individual tools
+        print("="*50)
+        print("Individual tool usage:")
+        
+        # Check spatial relationship
+        spatial_result = agent.use_tool('spatial_relationship', 
+                                    timestamp=3, 
+                                    object1_id='mask8', 
+                                    object2_id='self')
+        print(f"Spatial relationship at 3: {spatial_result}")
+        
+        # Get trajectory
+        trajectory_result = agent.use_tool('trajectory_analysis', object_id='mask8')
+        print(f"Trajectory summary: {trajectory_result['total_distance']:.2f} units total distance")
+        
+        # ADVANCED
+        agent = ConversationalAgent(sample_data)
+    
+        # Example conversation
+        questions = [
+            "How did mask8 move relative to self?",
+            "What's the distance between mask8 and mask0 at 2?",
+            # "Compare the positions of mask8 at 1 and 2"
+            # "Tell me about the trajectory of mask8"
+        ]
+        
+        print("=== Demo Conversation ===\n")
+        
+        for i, question in enumerate(questions, 1):
+            print(f"Q{i}: {question}")
+            answer = agent.chat(question)
+            print(f"A{i}: {answer}\n" + "-"*50 + "\n")
+        
+        print("\n=== Chain of Thought Demo ===\n")
+    
+        # Demo chain of thought reasoning
+        cot_agent = ChainOfThoughtAgent(SpatioTemporalAgent(sample_data))
+        
+        complex_queries = [
+            "Which object moved the fastest?",
+            "What object is closest to self?",
+            "Which object changed the most?"
+        ]
+        
+        for query in complex_queries:
+            print(f"Query: {query}")
+            result = cot_agent.solve_complex_query(query)
+            print(f"Answer: {result['final_result']}")
+            print(f"Reasoning steps: {', '.join(result['reasoning_steps'])}")
+            print("-" * 50)
+
+
+
+        tracker.reset_tracker()
+        start_idx = end_index
+
+        G_temporal_seq.append(G_temporal)
+        connect_Gs_seq.append(connect_Gs)
+        captions_seq.append(captions)
+
+        ## Visualize the results
+        # no_plots = len(frame_names_seq)
+        # fig, axes  = plt.subplots(10, int(no_plots/10), figsize=(20, 20))
         # ax_iter = iter(axes.flat)
 
-        # Main tracking loop
-        for i, f in enumerate(frame_names[1:]):
-            plots += 1
-            if plots > 30:
-                break
-            frame = Image.open(os.path.join(video_dir, f)) #image_pil
-            frame_RGB = np.array(frame) #image_rgb
-            frame_BGR = frame_RGB[:, :, ::-1]  # image
+        # for i, g in enumerate(G_temporal):
+        #     file = frame_names_seq[1:][i]
+        #     try:
+        #         ax = next(ax_iter)
+        #         visualize_mixed_graph(g, ax=ax)
+        #         ax.set_title(f'{file}', fontsize=12, weight='bold')
+        #     except StopIteration:
+        #         print(f"Warning: More graphs ({len(G_temporal)}) than subplots (12)")
+        #         break
 
-            out_obj_ids, out_mask_logits = tracker.track_frame(frame_BGR)
-            
-            # Prepare figure
-            # ax = next(ax_iter)
-            # display_img = frame_RGB.copy()
+        # # Hide unused subplots
+        # for j in range(i+1, no_plots):
+        #     axes.flat[j].axis('off')
 
-            rel_motion = np.square(calculate_motion_between_frames(file_prev, f, rgb_df, pose_df)['translation']).sum() ** 0.5
-            file_prev = f
-            if rel_motion > 0.05: # moved more than 5 cm
-                connect_Gs.append(rel_motion)
-            else:
-                connect_Gs.append(0.0)
-
-            image_nodes = []
-            mean_depths = []
-            # Process and visualize results
-            if len(out_obj_ids) > 0:
-                # Convert masks to numpy arrays and overlay on frame
-                title = ""
-                for i, (obj_id, mask_logit) in enumerate(zip(out_obj_ids, out_mask_logits)):
-                    # Convert logits to binary mask
-                    mask = (mask_logit.squeeze() > 0).cpu().numpy()  # Shape: (768, 1024)
-                    image_nodes.append(get_masked_image(frame_RGB, mask))
-
-                    mean_depth = get_relative_distance2obj(video_dir, f, mask)
-                    mean_depths.append(mean_depth)
-
-                    masked_rgb_cropped = get_masked_image(frame_RGB, mask)
-                    if masked_rgb_cropped is None:
-                        print("No mask found, skipping frame")
-                        continue
-                    # Create colored overlay for this object
-                    # color = [(255, 0, 0), (0, 255, 0), (0, 0, 255), 
-                    #         (255, 255, 0), (255, 0, 255), (0, 255, 255)][i % 6]
-                    
-                    # # Apply mask overlay
-                    # colored_mask = np.zeros_like(display_img)
-                    # colored_mask[mask > 0] = color
-                    # alpha = 0.3
-                    # display_img = ((1 - alpha) * display_img + alpha * colored_mask).astype(np.uint8)
-                    
-                    # title += f"{mean_depth:.2f}m, {rel_motion:.2f}m, ID: {obj_id}\n"
-                # ax.set_title(title.strip())
-            # Display frame
-            # ax.imshow(display_img)
-            # ax.axis('off')
-            
-            G = create_mixed_graph(image_nodes, mean_depths)
-            G_temporal.append(G)
-
-
-            # # Break on 'q' key
-            # if cv2.waitKey(1) & 0xFF == ord('q'):
-            #     break
-                
-            # # Example: Add new object on 'a' key press
-            # key = cv2.waitKey(1) & 0xFF
-            # if key == ord('a'):
-            #     # Add new object at center of frame
-            #     h, w = frame_BGR.shape[:2]
-            #     new_obj_id, _ = tracker.add_new_object((w//2, h//2), "point")
-            #     if new_obj_id:
-            #         print(f"Added new object with ID: {new_obj_id}")
-    
-        # plt.savefig('test.png')
-        # plt.close(fig)
-
-    # cv2.destroyAllWindows()
-    fig, axes  = plt.subplots(6, 5, figsize=(20, 20))
-    ax_iter = iter(axes.flat)
-
-    for i, g in enumerate(G_temporal):
-        file = frame_names[1:][i]
-        try:
-            ax = next(ax_iter)
-            visualize_mixed_graph(g, ax=ax)
-            ax.set_title(f'{file}', fontsize=12, weight='bold')
-        except StopIteration:
-            print(f"Warning: More graphs ({len(G_temporal)}) than subplots (12)")
-            break
-
-    # Hide unused subplots
-    for j in range(i+1, 12):
-        axes.flat[j].axis('off')
-
-    plt.tight_layout()
-    plt.show()
+        # plt.tight_layout()
+        # plt.show()
 
 
 if __name__ == "__main__":

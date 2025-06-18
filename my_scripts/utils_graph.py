@@ -8,6 +8,30 @@ import networkx as nx
 import cv2
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 import math
+from dataclasses import dataclass
+from typing import Dict, List, Any, Optional, Tuple
+
+# @dataclass
+# class GraphNode:
+#     id: str
+#     node_type: str
+#     content: Any  # Image data or text
+#     caption: str
+#     timestamp: str
+#     position: Tuple[float, float]
+
+@dataclass
+class GraphNode:
+    id: str
+    position: Tuple[float, float]
+    image: Any  # Your image data
+    text: str
+    timestamp: str
+
+@dataclass
+class GraphState:
+    nodes: Dict[str, GraphNode]
+    timestamp: str
 
 def get_relative_distance2obj(video_dir, image_file, mask):
     "it is important that there is one video_dir which has RGb and depth frames  termed frame00001.jpg and depth00001.png"
@@ -151,19 +175,28 @@ def calculate_motion_between_frames(frame1_name, frame2_name, rgb_df, pose_df):
         'angular_velocity': angle_axis / time_diff if time_diff != 0 else np.zeros(3)
     }
 
-def create_mixed_graph(image_nodes, rel_distances):
+def create_mixed_graph(image_nodes, rel_distances, timestamp=None, captions=None):
     """Create a graph with mixed node types"""
+    if timestamp is None:
+        timestamp = 0
+
+    if captions is None:
+        captions = [f"Object {i}" for i in range(len(image_nodes))]
+
     G = nx.Graph()
     
     # Add text node at center
-    G.add_node("text1", type="text", content="Self", pos=(0, 0))
+    G.add_node("self", node_type="text", content="Observer", caption="Observer position", timestamp=timestamp, position=(0, 0))
     
     # Calculate image sizes and determine spacing
     image_sizes = []
     for image_node in image_nodes:
-        h, w = image_node.shape[:2]
-        max_dim = max(h, w)
-        image_sizes.append(max_dim)
+        if image_node is not None:
+            h, w = image_node.shape[:2]
+            max_dim = max(h, w)
+            image_sizes.append(max_dim)
+        else:
+            image_sizes.append(100)
     
     # Determine base radius based on largest image
     max_size = max(image_sizes) if image_sizes else 100
@@ -175,21 +208,23 @@ def create_mixed_graph(image_nodes, rel_distances):
         angle = 2 * math.pi * i / len(image_nodes)
         
         # Calculate radius based on image size
-        img_size = image_sizes[i]
+        img_size = image_sizes[i] if image_sizes else 100
         radius = max(min_radius, base_radius * (img_size / max_size) + min_radius)
         
         x = radius * math.cos(angle)
         y = radius * math.sin(angle)
-        G.add_node(f"mask{i}", type="mask", content=image_node, pos=(x, y))
 
+        G.add_node(f"mask{i}", node_type="text" if image_node is None else "mask", content=image_node, caption=captions[i], timestamp=timestamp, position=(x, y))
+    
+    
     # Add nodes with different types
-    # G.add_node("text1", type="text", content="Self", pos=(0, 0))
+    # G.add_node("text1", type="text", content="Self", position=(0, 0))
     # for i, image_node in enumerate(image_nodes):
-    #     G.add_node(f"mask{i}", type="mask", content=image_node, pos=(1, i))
+    #     G.add_node(f"mask{i}", type="mask", content=image_node, position=(1, i))
     
     edges = []
     for i in range(len(image_nodes)):
-        edges.append(("text1", f"mask{i}", {"weight": rel_distances[i]}))
+        edges.append(("self", f"mask{i}", {"weight": rel_distances[i]}))
 
     G.add_edges_from(edges)
     
@@ -198,29 +233,29 @@ def create_mixed_graph(image_nodes, rel_distances):
 def visualize_mixed_graph(G, ax):
     """Visualize graph with text and image nodes"""    
     # Get positions
-    pos = nx.get_node_attributes(G, 'pos')
+    position = nx.get_node_attributes(G, 'position')
 
     # Draw edges with weights
     edges = G.edges(data=True)
     edge_weights = [d.get('weight', 1.0) for u, v, d in edges]
     
-    nx.draw_networkx_edges(G, pos, ax=ax, edge_color='gray', width=2)
+    nx.draw_networkx_edges(G, position, ax=ax, edge_color='gray', width=2)
     
     # Draw edge labels (weights)
     edge_labels = {(u, v): f"{d.get('weight', 1.0):.1f}" for u, v, d in edges}
-    nx.draw_networkx_edge_labels(G, pos, edge_labels, ax=ax, font_size=8)
+    nx.draw_networkx_edge_labels(G, position, edge_labels, ax=ax, font_size=8)
     
     # Process each node
-    for node, (x, y) in pos.items():
+    for node, (x, y) in position.items():
         node_data = G.nodes[node]
         
-        if node_data['type'] == 'text':
+        if node_data['node_type'] == 'text':
             # Draw text nodes as boxes
             bbox = dict(boxstyle="round,pad=0.3", facecolor='lightblue', alpha=0.8)
             ax.text(x, y, node_data['content'], ha='center', va='center', 
                    fontsize=12, bbox=bbox, weight='bold')
                    
-        elif node_data['type'] == 'mask':
+        elif node_data['node_type'] == 'mask':
             # Draw mask nodes as images
             mask_img = node_data['content']
             # Handle different mask formats
@@ -238,6 +273,9 @@ def visualize_mixed_graph(G, ax):
             imagebox = OffsetImage(mask_rgb, zoom=0.5)
             ab = AnnotationBbox(imagebox, (x, y), frameon=True, pad=0.1)
             ax.add_artist(ab)
+            # if you want to add caption to the image
+            # ax.text(x, y, node_data['caption'], ha='center', va='center', 
+            #        fontsize=6, bbox=bbox, weight='bold')
     
     # ax.set_xlim(-1, 3)
     # ax.set_ylim(-2, 2)
