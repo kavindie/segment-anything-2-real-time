@@ -78,7 +78,8 @@ We provide the file `sam2/benchmark.py` to test the speed gain from using the mo
 
 
 ## My additions
-pip install matplotlib opencv-python accelerate grouped_gemm==0.1.6 protobuf loguru 
+pip install matplotlib opencv-python accelerate grouped_gemm==0.1.6 protobuf loguru langgraph langchain smolagents duckduckgo-search 'smolagents[vllm]'
+pip install --upgrade --quiet huggingface_hub
 
 . venv2
 pip install open-clip-torch
@@ -91,7 +92,7 @@ export PATH=$CUDA_HOME/bin:$PATH
 export AM_I_DOCKER=False
 export BUILD_WITH_CUDA=True
 pip install --no-build-isolation -e ../Grounded-Segment-Anything/GroundingDINO
-
+pip install langchain-community
 
 
 /scratch3/kat049/Grounded-Segment-Anything/segment_anything/segment_anything/predictor.py:168
