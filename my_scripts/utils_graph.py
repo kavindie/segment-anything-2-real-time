@@ -29,6 +29,16 @@ class GraphNode:
     timestamp: str
 
 @dataclass
+class GraphNodeNew:
+    id: str
+    node_type: str
+    content: Any  # Your image data
+    caption: str
+    bbox: List
+    distance2self: float
+    timestamp: str
+
+@dataclass
 class GraphState:
     nodes: Dict[str, GraphNode]
     timestamp: str
@@ -175,7 +185,7 @@ def calculate_motion_between_frames(frame1_name, frame2_name, rgb_df, pose_df):
         'angular_velocity': angle_axis / time_diff if time_diff != 0 else np.zeros(3)
     }
 
-def create_mixed_graph(image_nodes, rel_distances, timestamp=None, captions=None):
+def create_mixed_graph(obj_IDs, image_nodes, rel_distances, bboxes, timestamp=None, captions=None):
     """Create a graph with mixed node types"""
     if timestamp is None:
         timestamp = 0
@@ -186,7 +196,7 @@ def create_mixed_graph(image_nodes, rel_distances, timestamp=None, captions=None
     G = nx.Graph()
     
     # Add text node at center
-    G.add_node("self", node_type="text", content="Observer", caption="Observer position", timestamp=timestamp, position=(0, 0))
+    G.add_node(f"objID_{-1}", node_type="text", content="Observer", caption="Observer position", bbox=None, timestamp=timestamp, position=(0, 0))
     
     # Calculate image sizes and determine spacing
     image_sizes = []
@@ -214,7 +224,7 @@ def create_mixed_graph(image_nodes, rel_distances, timestamp=None, captions=None
         x = radius * math.cos(angle)
         y = radius * math.sin(angle)
 
-        G.add_node(f"mask{i}", node_type="text" if image_node is None else "mask", content=image_node, caption=captions[i], timestamp=timestamp, position=(x, y))
+        G.add_node(f"objID_{obj_IDs[i]}", node_type="text" if image_node is None else "mask", content=image_node, caption=captions[i], bbox=bboxes[i], timestamp=timestamp, position=(x, y))
     
     
     # Add nodes with different types
@@ -224,7 +234,7 @@ def create_mixed_graph(image_nodes, rel_distances, timestamp=None, captions=None
     
     edges = []
     for i in range(len(image_nodes)):
-        edges.append(("self", f"mask{i}", {"weight": rel_distances[i]}))
+        edges.append((f"objID_{-1}", f"objID_{obj_IDs[i]}", {"weight": rel_distances[i]}))
 
     G.add_edges_from(edges)
     

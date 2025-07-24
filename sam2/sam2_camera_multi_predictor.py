@@ -178,6 +178,30 @@ class MultiObjectSAM2CameraPredictor:
         self.tracked_objects.clear()
         self.is_initialized = False
 
+
+def get_mask_properties_from_array(mask):
+    # Ensure mask is binary
+    binary_mask = (mask > 0).astype(np.uint8)
+
+    # Find non-zero pixel indices
+    non_zero_indices = np.argwhere(binary_mask)
+
+    if non_zero_indices.size == 0:
+        return None
+
+    # Get bounding box coordinates
+    y_min, x_min = non_zero_indices.min(axis=0)
+    y_max, x_max = non_zero_indices.max(axis=0)
+
+    # Compute width and height
+    width = x_max - x_min + 1
+    height = y_max - y_min + 1
+
+    # Compute area
+    area = int(binary_mask.sum())
+
+    return [float(x_min), float(y_min), float(width), float(height)]
+
 def create_seq_graph(start_idx, video_dir, frame_names, mask_generator, prompts_loader, tracker):
     first_frame = frame_names[0]
     file_prev = first_frame
@@ -192,6 +216,7 @@ def create_seq_graph(start_idx, video_dir, frame_names, mask_generator, prompts_
     masks = [mask for mask in masks_l]
     other_masks = [mask for mask in masks_s] + [mask for mask in masks_m]
     ann_obj_id_list = range(len(masks))
+    obj_IDs = list(range(len(masks)))
     for ann_obj_id in tqdm(ann_obj_id_list):
         seg = masks[ann_obj_id]['segmentation']
         prompts_loader.add(ann_obj_id,0,seg)
@@ -216,7 +241,7 @@ def create_seq_graph(start_idx, video_dir, frame_names, mask_generator, prompts_
     image_nodes = [get_masked_image(frame_RGB, masks[i]['segmentation']) for i in range(len(masks))]
     mean_depths = [get_relative_distance2obj(video_dir, first_frame, masks[i]['segmentation']) for i in range(len(masks))]
     captions = None #[Aria_caption(get_masked_image(frame_RGB, masks[i]['segmentation'])) for i in range(len(masks))]
-    G = create_mixed_graph(image_nodes=image_nodes, rel_distances=mean_depths, timestamp=start_idx, captions=captions)
+    G = create_mixed_graph(obj_IDs=obj_IDs, image_nodes=image_nodes, rel_distances=mean_depths, bboxes=bboxes, timestamp=start_idx, captions=captions)
     G_temporal.append(G)
 
     with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
@@ -244,20 +269,24 @@ def create_seq_graph(start_idx, video_dir, frame_names, mask_generator, prompts_
             else:
                 connect_Gs.append(0.0)
             
+            obj_IDs = []
             image_nodes = []
             mean_depths = []
+            bboxes_nodes = []
             captions_t = []
             # Process and visualize results
             if len(out_obj_ids) > 0:
                 # Convert masks to numpy arrays and overlay on frame
                 for i, (obj_id, mask_logit) in enumerate(zip(out_obj_ids, out_mask_logits)):
                     # Convert logits to binary mask
+                    obj_IDs.append(obj_id)
                     mask = (mask_logit.squeeze() > 0).cpu().numpy()  # Shape: (768, 1024)
                     
                     if not (mask==True).any():
                         print(f"No mask found for object {obj_id}, skipping")
                         mean_depths.append(0)
                         image_nodes.append(None)
+                        bboxes_nodes.append(None)
                         captions_t.append("")
                         continue
 
@@ -268,8 +297,9 @@ def create_seq_graph(start_idx, video_dir, frame_names, mask_generator, prompts_
                     image_nodes.append(masked_rgb_cropped)
                     caption = None #Aria_caption(masked_rgb_cropped)
                     captions_t.append(caption)
+                    bboxes_nodes.append(get_mask_properties_from_array(mask))
             
-            G = create_mixed_graph(image_nodes, mean_depths, timestamp=start_idx+i+1, captions=captions_t)
+            G = create_mixed_graph(obj_IDs, image_nodes, mean_depths, bboxes_nodes, timestamp=start_idx+i+1, captions=captions_t)
             G_temporal.append(G)
             # captions.append(captions_t)
 
