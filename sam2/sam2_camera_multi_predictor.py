@@ -240,7 +240,7 @@ def create_seq_graph(start_idx, video_dir, frame_names, mask_generator, prompts_
 
     image_nodes = [get_masked_image(frame_RGB, masks[i]['segmentation']) for i in range(len(masks))]
     mean_depths = [get_relative_distance2obj(video_dir, first_frame, masks[i]['segmentation']) for i in range(len(masks))]
-    captions = None #[Aria_caption(get_masked_image(frame_RGB, masks[i]['segmentation'])) for i in range(len(masks))]
+    captions = [Aria_caption(get_masked_image(frame_RGB, masks[i]['segmentation'])) for i in range(len(masks))]
     G = create_mixed_graph(obj_IDs=obj_IDs, image_nodes=image_nodes, rel_distances=mean_depths, bboxes=bboxes, timestamp=start_idx, captions=captions)
     G_temporal.append(G)
 

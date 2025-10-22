@@ -92,7 +92,7 @@ export PATH=$CUDA_HOME/bin:$PATH
 export AM_I_DOCKER=False
 export BUILD_WITH_CUDA=True
 pip install --no-build-isolation -e ../Grounded-Segment-Anything/GroundingDINO
-pip install langchain-community
+pip install langchain-community sentence-transformers autogen autogen-agentchat autogen-ext[ollama]
 
 
 /scratch3/kat049/Grounded-Segment-Anything/segment_anything/segment_anything/predictor.py:168
